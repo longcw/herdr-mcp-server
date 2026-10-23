@@ -7,6 +7,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import transcript
 from config import settings
@@ -21,8 +22,8 @@ class HerdrError(RuntimeError):
     """A herdr command failed; the message is herdr's own."""
 
 
-async def run(*args: str) -> dict:
-    """Run one herdr command and return its JSON ``result``."""
+async def run(*args: str, raw: bool = False) -> Any:
+    """Run one herdr command and return its JSON ``result``, or its plain output if ``raw``."""
     proc = await asyncio.create_subprocess_exec(
         settings.herdr_bin,
         *args,
@@ -36,6 +37,8 @@ async def run(*args: str) -> dict:
             raise HerdrError(f"{error['code']}: {error['message']}")
         except (ValueError, KeyError, TypeError):
             raise HerdrError((err or out).decode().strip() or f"herdr {args[0]} failed")
+    if raw:
+        return out.decode()
     return json.loads(out).get("result", {})
 
 
@@ -177,6 +180,19 @@ async def submit(pane_id: str, text: str) -> None:
         # an agent still settling after start can take the text yet drop its Enter
         if not str(exc).startswith("agent_prompt_stalled"):
             raise
+        await keys(pane_id, "enter")
+        return
+    # an agent already working passes the wait above even when its Enter was dropped, so look
+    # for the text still sitting in Claude Code's input box
+    await asyncio.sleep(0.5)
+    screen = await run("agent", "read", pane_id, "--source", "visible", raw=True)
+    box = next(
+        (ln[1:].strip() for ln in reversed(screen.splitlines()) if ln.startswith("❯")),
+        "",
+    )
+    if box and (
+        box.startswith("[Pasted text") or text.strip().splitlines()[0][:15] in box
+    ):
         await keys(pane_id, "enter")
 
 

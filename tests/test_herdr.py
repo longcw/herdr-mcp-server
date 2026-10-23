@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 import herdr
@@ -53,6 +55,33 @@ async def test_a_stalled_prompt_is_sent_with_enter(monkeypatch) -> None:
     monkeypatch.setattr(herdr, "run", run)
     await herdr.submit("w1:p5", "do it")
     assert calls[-1] == ("agent", "send-keys", "w1:p5", "enter")
+
+
+def _screen(monkeypatch, box: str) -> list[tuple[str, ...]]:
+    calls: list[tuple[str, ...]] = []
+
+    async def run(*args: str, raw: bool = False) -> object:
+        calls.append(args)
+        if args[:2] == ("agent", "read"):
+            return f"✻ Working…\n──────\n❯ {box}\n──────\n  ⏵⏵ auto mode on\n"
+        return {}
+
+    sleep = asyncio.sleep
+    monkeypatch.setattr(herdr, "run", run)
+    monkeypatch.setattr(asyncio, "sleep", lambda _: sleep(0))
+    return calls
+
+
+async def test_a_prompt_left_in_a_busy_agents_input_is_sent(monkeypatch) -> None:
+    calls = _screen(monkeypatch, "check the balcony switch too")
+    await herdr.submit("w1:p5", "check the balcony switch too\nand the logs")
+    assert calls[-1] == ("agent", "send-keys", "w1:p5", "enter")
+
+
+async def test_a_sent_prompt_gets_no_extra_enter(monkeypatch) -> None:
+    calls = _screen(monkeypatch, "")
+    await herdr.submit("w1:p5", "check the balcony switch too")
+    assert calls[-1][:2] == ("agent", "read")
 
 
 async def test_a_resumed_session_starts_on_its_id(monkeypatch) -> None:
