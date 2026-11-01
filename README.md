@@ -14,7 +14,6 @@ It was built for the [Home Assistant voice agent](https://github.com/longcw/home
 | --- | --- |
 | `list_herdr_agents(query?)` | Sessions that are working, blocked or active in the last 6 hours; a query searches all of them by title, folder, workspace or state |
 | `get_herdr_agent(agent)` | A session's state and the last thing the agent said in its current turn |
-| `watch_herdr_agent(agent)` | Follows a session until it finishes or needs you |
 | `prompt_herdr_agent(agent, text)` | Sends a follow-up, or answers the multiple-choice question the session asks |
 | `answer_herdr_permission(agent, allow)` | Approves once, or refuses, the permission prompt a session is blocked on |
 | `start_herdr_agent(prompt, kind?, folder?, workspace?)` | Starts an agent (`claude`) on a task, in a folder under `~/code` by default |
@@ -24,26 +23,11 @@ It was built for the [Home Assistant voice agent](https://github.com/longcw/home
 
 An `agent` argument is a description, not an id: words from the title ("the agents-js issue"), a folder or workspace, a state ("the blocked one"), "the focused one", a pane id or a session id. When more than one session fits, the tool lists them so the client can ask which one.
 
-The tool descriptions tell the calling model to confirm before `start_herdr_agent` and before approving a permission, to send follow-ups about a session's work back to that session instead of answering them itself, and to ask the person before closing a session once its task is done. Every result names the session's pane id for that, and its Claude Code session id, which reopens it after it is closed. The server does not enforce any of it.
+Every tool returns as soon as its work is sent; the server never waits for a session to finish. Follow a session in herdr, take it over there, or ask the assistant, which reads it with `get_herdr_agent` and sends it more with `prompt_herdr_agent`. The tool descriptions tell the calling model to send follow-ups about a session's work back to that session instead of answering them itself, and to ask the person before closing a session. Every result names the session's pane id for that, and its Claude Code session id, which reopens it after it is closed. Starting an agent runs code on this computer, so a client should get the person's yes before `start_herdr_agent`; the server leaves that to the client and enforces none of it.
 
 ## Closing sessions
 
 A closed tab ends the terminal, but the session stays on disk under `~/.claude/projects`, so `resume_herdr_agent` reopens it with `claude --resume` in the folder it ran in. The server remembers the tabs it opened in `~/.local/state/herdr-mcp-server/tabs.json`, and closes one whose session has been idle or done for `HERDR_MCP_CLOSE_AFTER_HOURS`. A blocked session waits for the person and is never closed, and neither is a session the person opened themselves.
-
-## Results that outlive a tool call
-
-`start_herdr_agent`, `watch_herdr_agent`, `prompt_herdr_agent` and `answer_herdr_permission` send an MCP progress notification at once, so a client that supports progress can keep the conversation going. Each tool then waits up to `HERDR_MCP_WATCH_WINDOW` seconds for the agent to finish or block. One still working after that is reported through a webhook. The client names its webhook in two headers on every MCP request:
-
-- `X-Callback-Url`: where to POST. Put any routing the client needs, such as a conversation or user, in the URL itself.
-- `X-Callback-Token`: sent back as `Authorization: Bearer <token>`.
-
-When the session settles, the server POSTs this once:
-
-```json
-{"source": "Claude Code", "text": "\"Fix the flaky test\" finished.\nLast message: …", "title": "Fix the flaky test", "state": "done", "pane_id": "w3:p2"}
-```
-
-`state` is `done`, `idle`, `blocked` or `closed`. A failed callback is retried with backoff, up to 10 times. Pending callbacks are saved in `~/.local/state/herdr-mcp-server/subscriptions.json`, so they survive a restart. A client that sends no headers gets "still working" and can ask again later.
 
 ## Run
 
@@ -69,14 +53,10 @@ The server has no authentication of its own, and a client can use it to run code
 | `HERDR_MCP_HOST` / `HERDR_MCP_PORT` | `0.0.0.0` / `8960` | Where the MCP server listens |
 | `HERDR_MCP_WORKSPACE` | `herdr-mcp` | herdr workspace label for agents started from here, when the call names none |
 | `HERDR_MCP_CODE_DIR` | `~/code` | Default folder for new agents, and where folder names are looked up |
-| `HERDR_MCP_WATCH_WINDOW` | `60` | Seconds a tool call waits before its result goes to the webhook instead |
-| `HERDR_MCP_SETTLE` | `4` | Seconds a session has to stay idle or blocked before it counts as settled |
-| `HERDR_MCP_SUBSCRIPTION_TTL_HOURS` | `24` | How long a webhook waits for its session before it is dropped |
 | `HERDR_MCP_CLOSE_AFTER_HOURS` | `6` | Hours a session this server opened may sit finished before its tab is closed; `0` never closes one |
 | `HERDR_BIN` | `herdr` on `PATH` | The herdr CLI |
 
 ## Limits
 
-- Only settled states are reported, not the messages Claude Code writes while it works.
 - A question with several parts has to be answered in herdr.
 - Session state comes from herdr, which detects it from the pane's contents, so an unusual screen can be misread.

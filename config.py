@@ -23,15 +23,6 @@ class Settings:
     # the folder a task starts in when none is named, and where names are looked up
     code_dir: Path
     claude_projects: Path
-    # seconds a tool call waits for its task before answering "still running"
-    watch_window: float
-    # seconds a task has to stay settled before it counts as done or blocked
-    settle: float
-    poll: float
-    # subscriptions waiting to call back, kept across restarts
-    state_file: Path
-    # hours a subscription waits for its task before it is dropped
-    subscription_ttl: float
     # characters of Claude Code's last message a result carries
     max_text: int
     # the tabs this server opened, kept across restarts so it can close them
@@ -49,11 +40,6 @@ def load_settings() -> Settings:
         workspace_label=os.getenv("HERDR_MCP_WORKSPACE", "herdr-mcp"),
         code_dir=Path(os.getenv("HERDR_MCP_CODE_DIR", "~/code")).expanduser(),
         claude_projects=Path("~/.claude/projects").expanduser(),
-        watch_window=float(os.getenv("HERDR_MCP_WATCH_WINDOW", "60")),
-        settle=float(os.getenv("HERDR_MCP_SETTLE", "4")),
-        poll=float(os.getenv("HERDR_MCP_POLL", "2")),
-        state_file=state.expanduser() / "subscriptions.json",
-        subscription_ttl=float(os.getenv("HERDR_MCP_SUBSCRIPTION_TTL_HOURS", "24")),
         max_text=int(os.getenv("HERDR_MCP_MAX_TEXT", "800")),
         tabs_file=state.expanduser() / "tabs.json",
         close_after=float(os.getenv("HERDR_MCP_CLOSE_AFTER_HOURS", "6")),

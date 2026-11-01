@@ -12,8 +12,6 @@ from typing import Any
 import transcript
 from config import settings
 
-# states in which an agent is waiting for someone, not working
-SETTLED = ("idle", "done", "blocked")
 # agent kinds whose transcript this server can read, by herdr's --kind, with their names
 KINDS = {"claude": "Claude Code"}
 

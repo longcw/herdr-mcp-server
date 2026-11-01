@@ -1,8 +1,7 @@
 """MCP server that lets an assistant drive the coding agents running in herdr.
 
-A tool that sends work waits up to HERDR_MCP_WATCH_WINDOW seconds for it. A task still
-running then is reported back later: the client names a webhook in the X-Callback-Url
-and X-Callback-Token headers, and the server POSTs there once the task settles.
+A tool that sends work returns once the work is sent; the person follows the session in
+herdr, and the assistant checks on it with get_herdr_agent when asked.
 """
 
 from __future__ import annotations
@@ -14,22 +13,19 @@ import time
 from pathlib import Path
 from typing import Annotated, Literal
 
-import anyio
 import uvicorn
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 import herdr
 import match
 import transcript
-import watch
 from config import settings
 from tabs import Tabs
 
 logger = logging.getLogger("herdr-mcp-server")
 
-subscriptions = watch.Subscriptions()
 tabs = Tabs()
 
 # the default folder as a person would say it
@@ -60,38 +56,28 @@ async def _find(ref: str) -> herdr.Agent:
         raise ToolError(str(exc)) from exc
 
 
-async def _follow(ctx: Context, agent: herdr.Agent, *, expect_work: bool) -> str:
-    """Wait a while for the agent, then answer with how it ended or that it runs on."""
-    # the first progress report lets the caller answer while this waits
-    await ctx.report_progress(
-        0, None, "Following it; the result comes as a later update."
-    )
-    try:
-        settled = await watch.settle(
-            agent.pane_id, settings.watch_window, expect_work=expect_work
-        )
-    except herdr.HerdrError as exc:
-        raise ToolError(str(exc)) from exc
-    except anyio.get_cancelled_exc_class():
-        # the client cancelled the call, which means it wants the work itself stopped;
-        # shielded, as every await in a cancelled scope is cancelled too
-        with anyio.CancelScope(shield=True), contextlib.suppress(herdr.HerdrError):
-            current = await herdr.get(agent.pane_id)
-            if current is not None and current.status == "working":
-                await herdr.keys(agent.pane_id, "esc")
-                logger.info("stopped %s, as its call was cancelled", agent.pane_id)
-        raise
-    if settled is not None:
-        return watch.outcome(settled)
-    request = ctx.request_context.request
-    callback = request.headers.get("x-callback-url") if request is not None else None
+def _sent(agent: herdr.Agent) -> str:
+    """Where follow-ups about a session go, so they reach it rather than the model."""
+    text = f'Follow-ups go to prompt_herdr_agent(agent "{agent.pane_id}").'
+    if agent.session_id:
+        text += f' Its session "{agent.session_id}" reopens with resume_herdr_agent.'
+    return text
+
+
+def _waiting(agent: herdr.Agent) -> str:
+    """What a blocked session waits for, and which tool answers it."""
+    log = agent.transcript
     pane = f'agent "{agent.pane_id}"'
-    if not callback:
-        return f'"{agent.title}" is still working. Check later with get_herdr_agent({pane}).'
-    subscriptions.add(agent, callback, request.headers.get("x-callback-token", ""))
+    text = f'"{agent.title}" {log.pending_text() or "is waiting for input in herdr"}.'
+    if log.choices:
+        return (
+            text
+            + f" Answer with prompt_herdr_agent({pane}), naming one of the choices."
+        )
+    if log.asks_question:
+        return text + " It asks several questions at once; answer them in herdr."
     return (
-        f'"{agent.title}" is still working. An update will arrive in this conversation '
-        f"when it finishes or needs the person; follow-ups go to prompt_herdr_agent({pane})."
+        text + f" Answer with answer_herdr_permission({pane}) once the person decides."
     )
 
 
@@ -151,20 +137,13 @@ async def get_herdr_agent(agent: AgentRef) -> str:
 
 
 @mcp.tool()
-async def watch_herdr_agent(ctx: Context, agent: AgentRef) -> str:
-    """Follow an agent session until it finishes or needs the person."""
-    return await _follow(ctx, await _find(agent), expect_work=False)
-
-
-@mcp.tool()
 async def prompt_herdr_agent(
-    ctx: Context,
     agent: AgentRef,
     text: Annotated[
         str, Field(description="The message for the agent, in the person's words.")
     ],
 ) -> str:
-    """Send a message to an agent session, then follow it. No confirmation needed.
+    """Send a message to an agent session. No confirmation needed.
 
     Use it for every follow-up about what a session found or did: after one checked
     the computer's memory, "why is it so high?" goes to that same session rather than
@@ -179,39 +158,35 @@ async def prompt_herdr_agent(
             # the question's choices are numbered, and a digit picks one
             await herdr.keys(found.pane_id, str(choice))
         else:
-            raise ToolError(watch.outcome(found))
+            raise ToolError(_waiting(found))
     except herdr.HerdrError as exc:
         raise ToolError(str(exc)) from exc
     logger.info("prompted %s", found.pane_id)
-    return f'Sent to "{found.title}".\n' + await _follow(ctx, found, expect_work=True)
+    return f'Sent to "{found.title}". {_sent(found)}'
 
 
 @mcp.tool()
 async def answer_herdr_permission(
-    ctx: Context,
     agent: AgentRef,
     allow: Annotated[bool, Field(description="True to approve once, False to refuse.")],
 ) -> str:
-    """Approve or refuse the permission prompt an agent session is blocked on.
-
-    Say what it wants to run and get the person's yes before approving.
-    """
+    """Approve or refuse the permission prompt an agent session is blocked on, as the
+    person asks."""
     found = await _find(agent)
     if found.status != "blocked":
         raise ToolError(
             f'"{found.title}" is not waiting for permission; it is {found.status}.'
         )
     if found.transcript.asks_question:
-        raise ToolError(watch.outcome(found))
+        raise ToolError(_waiting(found))
     # the prompt's first choice is "Yes", and esc refuses and stops the turn
     await herdr.keys(found.pane_id, "enter" if allow else "esc")
     logger.info("%s permission in %s", "granted" if allow else "refused", found.pane_id)
-    return await _follow(ctx, found, expect_work=allow)
+    return f'{"Approved" if allow else "Refused"} in "{found.title}". {_sent(found)}'
 
 
 @mcp.tool()
 async def start_herdr_agent(
-    ctx: Context,
     prompt: Annotated[
         str,
         Field(description="The task for the agent, complete enough to work on alone."),
@@ -236,9 +211,9 @@ async def start_herdr_agent(
 
     Use it whenever they ask for work on or with the computer, e.g. "用电脑查一下…" or
     "on my computer, check…": running commands, checking memory, disks or processes,
-    searching the web from there, or working in a repo. Follow-ups then go to the same
-    session with prompt_herdr_agent. Say the task and folder back to the person and get
-    their yes before calling this.
+    searching the web from there, or working in a repo. It returns once the session has
+    its task, which the person follows in herdr; follow-ups go to the same session with
+    prompt_herdr_agent.
     """
     cwd = _folder(folder)
     try:
@@ -249,13 +224,11 @@ async def start_herdr_agent(
         raise ToolError(f"could not start {herdr.KINDS[kind]}: {exc}") from exc
     logger.info("started %s %s in %s", kind, found.pane_id, cwd)
     tabs.add(found)
-    started = f"Started {herdr.KINDS[kind]} in {found.folder}, pane {found.pane_id}.\n"
-    return started + await _follow(ctx, found, expect_work=True)
+    return f"Started {herdr.KINDS[kind]} in {found.folder}, pane {found.pane_id}. {_sent(found)}"
 
 
 @mcp.tool()
 async def resume_herdr_agent(
-    ctx: Context,
     session: Annotated[
         str, Field(description="The session id an earlier result named.")
     ],
@@ -283,10 +256,11 @@ async def resume_herdr_agent(
             await herdr.submit(found.pane_id, prompt)
     except herdr.HerdrError as exc:
         raise ToolError(f"could not resume {session}: {exc}") from exc
-    opened = f'"{found.title}" is open in pane {found.pane_id}.\n'
-    if not prompt.strip():
-        return opened + found.describe(detail=True)
-    return opened + await _follow(ctx, found, expect_work=True)
+    if prompt.strip():
+        return f'"{found.title}" is open in pane {found.pane_id} and has the prompt. {_sent(found)}'
+    return f'"{found.title}" is open in pane {found.pane_id}.\n' + found.describe(
+        detail=True
+    )
 
 
 @mcp.tool()
@@ -321,19 +295,15 @@ if __name__ == "__main__":
     app = mcp.streamable_http_app()
     serve_mcp = app.router.lifespan_context
 
-    # FastMCP's own lifespan runs per MCP session; callbacks outlive every session
+    # FastMCP's own lifespan runs per MCP session; closing idle tabs outlives every session
     @contextlib.asynccontextmanager
     async def lifespan(app):
         async with serve_mcp(app):
-            tasks = [
-                asyncio.create_task(subscriptions.run()),
-                asyncio.create_task(tabs.run()),
-            ]
+            task = asyncio.create_task(tabs.run())
             try:
                 yield
             finally:
-                for task in tasks:
-                    task.cancel()
+                task.cancel()
 
     app.router.lifespan_context = lifespan
     uvicorn.run(app, host=settings.host, port=settings.port)
